@@ -1,0 +1,142 @@
+
+passwd:
+  users:
+    - name:          "core"
+      password_hash: "$6$SALT$PeonPENckecbusewilNppuQ1cVkyjhpElqQoX/EKiNC9L75Dn.LgauT1eyAZ6cKBXvnHoK/rhMgEvLpV6/3w21"
+      ssh_authorized_keys:
+        - "ssh-rsa AAAAB..."
+
+    - name:          "root"
+      password_hash: "$6$SALT$PeonPENckecbusewilNppuQ1cVkyjhpElqQoX/EKiNC9L75Dn.LgauT1eyAZ6cKBXvnHoK/rhMgEvLpV6/3w21"
+      ssh_authorized_keys:
+        - "ssh-rsa AAAAB..."
+
+
+networkd:
+  units:
+    - name: ens192.network
+      contents: |
+        [Match]
+        Name=ens192
+        [Network]
+        Address=<PRIVATE_IP>/<NETMASK>
+    
+    - name: ens224.network
+      contents: |
+        [Match]
+        Name=ens224
+        [Network]
+        Address=<PUBLIC_IP>/<NETMASK>
+        Gateway=<GATEWAY_IP>
+        DNS=<DNS_IP>
+
+etcd:
+  advertise_client_urls:       "http://<PUBLIC_IP>:2379"
+  initial_advertise_peer_urls: "http://<PUBLIC_IP>:2380"
+  listen_client_urls:          "http://0.0.0.0:2379"
+  listen_peer_urls:            "http://<PUBLIC_IP>:2380"
+  discovery:                   "https://discovery.etcd.io/<TOKEN>"
+
+
+update:
+  group:  "stable"
+
+
+locksmith:
+  reboot_strategy: "etcd-lock"
+  window_start:    "Sun 1:00"
+  window_length:   "2h"
+
+
+systemd:
+  units:
+    # /usr/lib/systemd/system/clean-ca-certificates.service
+    - name: update-self-ca-certificate.service
+      enabled: true
+      contents: |
+        [Unit]
+        Description=Update self CA certificate /etc/ssl/certs/XXXSecureInternetProxyCA.pem
+        DefaultDependencies=no
+        Wants=clean-ca-certificates.service
+        After=clean-ca-certificates.service
+        Before=sysinit.target
+        ConditionPathIsReadWrite=/etc/ssl/certs
+        [Service]
+        Type=oneshot
+        ExecStart=/usr/sbin/update-ca-certificates
+        [Install]
+        WantedBy=multi-user.target
+    
+    - name: etcd-member.service
+      dropins:
+        - name: proxy.conf
+          contents: |
+            [Service]
+            Environment="ETCD_DISCOVERY_PROXY=<PROXY_IP_PORT>"
+    
+    - name: flanneld.service
+      enabled: true
+      dropins:
+        - name: network-config.conf
+          contents: |
+            [Service]
+            ExecStartPre=/usr/bin/etcdctl set /coreos.com/network/config '{ "Network": "10.192.0.0/10", "SubnetLen": 20 }'
+    
+    - name: docker.service
+      enabled: true
+      dropins:
+        - name: flannel.conf
+          contents: |
+            [Unit]
+            Requires=flanneld.service
+            After=flanneld.service
+            [Service]
+            Restart=on-failure
+
+
+storage:
+  files:
+    - path:       /etc/hostname
+      filesystem: root
+      mode:       0644
+      contents:
+        inline: core-01
+    
+    - path: /etc/profile.env
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          export http_proxy=<PROXY_IP_PORT>
+          export https_proxy=<PROXY_IP_PORT>
+          export no_proxy=$(echo 192.168.0.{1..255} | sed "s/ /,/g")
+          export no_proxy=${no_proxy},$(echo 10.90.195.{1..255} | sed "s/ /,/g")
+          export no_proxy=${no_proxy},localhost,127.0.0.1,.example.com
+    
+    # https://coreos.com/os/docs/latest/using-environment-variables-in-systemd-units.html#system-wide-environment-variables
+    - path: /etc/systemd/system.conf.d/10-default-env.conf
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          [Manager]
+          DefaultEnvironment="HTTP_PROXY=<PROXY_IP_PORT>"
+          DefaultEnvironment="HTTPS_PROXY=<PROXY_IP_PORT>"
+          DefaultEnvironment="NO_PROXY=127.0.0.1"
+    
+    # https://coreos.com/os/docs/latest/cloud-config-examples.html#setting-an-ntp-source
+    # https://coreos.com/os/docs/latest/configuring-date-and-timezone.html#changing-ntp-time-sources
+    - path: /etc/systemd/timesyncd.conf
+      filesystem: root
+      mode: 0644
+      contents:
+        inline: |
+          [Time]
+          NTP=<NTP_IP>
+    
+    - path:       /etc/ssl/certs/ProxySecureInternetProxyCA.pem
+      filesystem: root
+      mode:       0644
+      contents:
+        inline: |
+          <pem>
